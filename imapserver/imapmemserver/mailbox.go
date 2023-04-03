@@ -25,6 +25,7 @@ type Mailbox struct {
 	subscribed bool
 	l          []*message
 	uidNext    uint32
+	flags      map[imap.Flag]struct{}
 }
 
 // NewMailbox creates a new mailbox.
@@ -33,6 +34,7 @@ func NewMailbox(name string) *Mailbox {
 		tracker: imapserver.NewMailboxTracker(0),
 		name:    name,
 		uidNext: 1,
+		flags:   make(map[imap.Flag]struct{}),
 	}
 }
 
@@ -149,6 +151,8 @@ func (mbox *Mailbox) appendBytes(buf []byte, options *imap.AppendOptions) *imap.
 	mbox.l = append(mbox.l, msg)
 	mbox.tracker.QueueNumMessages(uint32(len(mbox.l)))
 
+	mbox.addFlagsLocked(options.Flags)
+
 	return &imap.AppendData{
 		UIDValidity: uidValidity,
 		UID:         msg.uid,
@@ -169,7 +173,7 @@ func (mbox *Mailbox) SetSubscribed(subscribed bool) {
 }
 
 func (mbox *Mailbox) selectDataLocked() *imap.SelectData {
-	flags := mbox.flagsLocked()
+	flags := flagMapToList(mbox.flags)
 
 	permanentFlags := make([]imap.Flag, len(flags))
 	copy(permanentFlags, flags)
@@ -184,24 +188,17 @@ func (mbox *Mailbox) selectDataLocked() *imap.SelectData {
 	}
 }
 
-func (mbox *Mailbox) flagsLocked() []imap.Flag {
-	m := make(map[imap.Flag]struct{})
-	for _, msg := range mbox.l {
-		for flag := range msg.flags {
-			m[flag] = struct{}{}
+func (mbox *Mailbox) addFlagsLocked(flags []imap.Flag) {
+	changed := false
+	for _, flag := range flags {
+		if _, ok := mbox.flags[canonicalFlag(flag)]; !ok {
+			changed = true
 		}
+		mbox.flags[canonicalFlag(flag)] = struct{}{}
 	}
-
-	var l []imap.Flag
-	for flag := range m {
-		l = append(l, flag)
+	if changed {
+		mbox.tracker.QueueMailboxFlags(flagMapToList(mbox.flags))
 	}
-
-	sort.Slice(l, func(i, j int) bool {
-		return l[i] < l[j]
-	})
-
-	return l
 }
 
 func (mbox *Mailbox) Expunge(w *imapserver.ExpungeWriter, uids *imap.SeqSet) error {
@@ -351,14 +348,28 @@ func (mbox *MailboxView) Search(numKind imapserver.NumKind, criteria *imap.Searc
 }
 
 func (mbox *MailboxView) Store(w *imapserver.FetchWriter, numKind imapserver.NumKind, seqSet imap.SeqSet, flags *imap.StoreFlags) error {
-	mbox.forEach(numKind, seqSet, func(seqNum uint32, msg *message) {
-		msg.store(flags)
-		mbox.Mailbox.tracker.QueueMessageFlags(seqNum, msg.uid, msg.flagList(), mbox.tracker)
-	})
+	mbox.store(numKind, seqSet, flags)
 	if !flags.Silent {
 		return mbox.Fetch(w, numKind, seqSet, []imap.FetchItem{imap.FetchItemFlags})
 	}
 	return nil
+}
+
+func (mbox *MailboxView) store(numKind imapserver.NumKind, seqSet imap.SeqSet, flags *imap.StoreFlags) {
+	mbox.mutex.Lock()
+	defer mbox.mutex.Unlock()
+
+	// We need to announce the new flags via a FLAGS response before sending
+	// FETCH FLAGS responses
+	switch flags.Op {
+	case imap.StoreFlagsSet, imap.StoreFlagsAdd:
+		mbox.addFlagsLocked(flags.Flags)
+	}
+
+	mbox.forEachLocked(numKind, seqSet, func(seqNum uint32, msg *message) {
+		msg.store(flags)
+		mbox.Mailbox.tracker.QueueMessageFlags(seqNum, msg.uid, msg.flagList(), mbox.tracker)
+	})
 }
 
 func (mbox *MailboxView) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
@@ -426,4 +437,17 @@ func (mbox *MailboxView) staticSeqSet(seqSet imap.SeqSet, numKind imapserver.Num
 			seq.Start, seq.Stop = seq.Stop, seq.Start
 		}
 	}
+}
+
+func flagMapToList(m map[imap.Flag]struct{}) []imap.Flag {
+	var l []imap.Flag
+	for flag := range m {
+		l = append(l, flag)
+	}
+
+	sort.Slice(l, func(i, j int) bool {
+		return l[i] < l[j]
+	})
+
+	return l
 }
