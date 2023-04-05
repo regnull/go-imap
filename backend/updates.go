@@ -96,3 +96,8 @@ type MailboxPoller interface {
 	// Poll requests mailbox updates.
 	Poll() error
 }
+
+type MailboxIdler interface {
+	StartIdle() error
+	StopIdle() error
+}

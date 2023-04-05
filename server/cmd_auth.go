@@ -305,20 +305,49 @@ type Idle struct {
 }
 
 func (cmd *Idle) Handle(conn Conn) error {
+	ctx := conn.Context()
 	cont := &imap.ContinuationReq{Info: "idling"}
 	if err := conn.WriteResp(cont); err != nil {
 		return err
+	}
+
+	var idler backend.MailboxIdler
+	if ctx.Mailbox != nil {
+		if i, ok := ctx.Mailbox.(backend.MailboxIdler); ok {
+			idler = i
+		}
+	}
+
+	if idler != nil {
+		err := idler.StartIdle()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Wait for DONE
 	scanner := bufio.NewScanner(conn)
 	scanner.Scan()
 	if err := scanner.Err(); err != nil {
+		if idler != nil {
+			_ = idler.StopIdle()
+		}
 		return err
 	}
 
 	if strings.ToUpper(scanner.Text()) != "DONE" {
+		if idler != nil {
+			_ = idler.StopIdle()
+		}
 		return errors.New("Expected DONE")
 	}
+
+	if idler != nil {
+		err := idler.StopIdle()
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
