@@ -313,9 +313,7 @@ func (cmd *Idle) Handle(conn Conn) error {
 
 	var idler backend.MailboxIdler
 	if ctx.Mailbox != nil {
-		if i, ok := ctx.Mailbox.(backend.MailboxIdler); ok {
-			idler = i
-		}
+		idler, _ = ctx.Mailbox.(backend.MailboxIdler)
 	}
 
 	if idler != nil {
